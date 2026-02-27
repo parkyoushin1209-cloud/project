@@ -1,0 +1,273 @@
+`define dp_width 32
+`timescale 1ps/1ps
+//alu top모듈듈
+module ALU_top(
+    output READY,
+    output [`dp_width*2-1:0] result,
+    output FLAG_N, FLAG_Z, FLAG_C, FLAG_V,
+    input reset_b, clock, start,
+    input [2:0] alu_ctr,
+    input [`dp_width-1:0] data_a, data_b
+);
+
+wire LOAD, DECR_P, ADD, SHIFT, AND, OR, XOR, FLAGW, CONVERT;
+wire zero, al0;
+wire [`dp_width-1:0] AH, AL;
+
+assign result = (alu_ctr==3'b010) ? {AH,AL} : {{`dp_width{1'b0}},AH};
+//곱셈일 때만 두 레지스터 모두 보여주고 나머지 연산은 결과값 위는 0으로 채움
+
+ALU_controller CTRL(
+    .clock(clock), .reset_b(reset_b), .start(start),
+    .alu_ctr(alu_ctr), .zero(zero), .al0(al0),
+    .READY(READY),
+    .LOAD(LOAD), .DECR_P(DECR_P), .ADD(ADD), .SHIFT(SHIFT),
+    .AND(AND), .OR(OR), .XOR(XOR), .FLAGW(FLAGW), .CONVERT(CONVERT)
+);
+
+ALU_datapath DP(
+    .clock(clock), .alu_ctr(alu_ctr),
+    .LOAD(LOAD), .DECR_P(DECR_P), .ADD(ADD), .SHIFT(SHIFT),
+    .AND(AND), .OR(OR), .XOR(XOR), .FLAGW(FLAGW), .CONVERT(CONVERT),
+    .data_a(data_a), .data_b(data_b),
+    .zero(zero), .al0(al0),
+    .AH(AH), .AL(AL),
+    .FLAG_N(FLAG_N), .FLAG_Z(FLAG_Z),
+    .FLAG_C(FLAG_C), .FLAG_V(FLAG_V)
+);
+
+endmodule
+
+// alu FSM 제어기    /////////////////////////////////////
+module ALU_controller (
+    input clock, reset_b, start,
+    input [2:0] alu_ctr,
+    input zero, al0,
+    output reg READY,
+    output reg LOAD, DECR_P, ADD, SUB, SHIFT,
+    output reg AND, OR, XOR, MULTI,
+    output reg FLAGW, CONVERT  //FRAGW = Frag 작성 제어 신호
+);
+
+parameter s_idle = 3'b000, s1 = 3'b001, s2 = 3'b010, s3 = 3'b011, s4 = 3'b100; //상태 파라미터 정의
+parameter 
+f0 = 3'b000, //add
+f1 = 3'b001, //sub
+f2 = 3'b010, //multi
+f3 = 3'b011, //and
+f4 = 3'b100, //or
+f5 = 3'b101; //xor  
+
+reg [2:0] state, next_state;
+
+always @(posedge clock, negedge reset_b)
+    if(!reset_b) state <= s_idle;
+    else state <= next_state;
+
+always @(*) begin  //모든 케이스에 대해 고려하지 않을 시 의도치 않은 래치 발생 가능 -> @(*)로 처리
+    next_state = s_idle;
+    READY=0; LOAD=0; DECR_P=0; ADD=0; SUB=0; SHIFT=0;
+    AND=0; OR=0; XOR=0; MULTI=0; FLAGW=0; CONVERT=0;
+
+case(alu_ctr)
+f0: begin
+    case(state)
+    s_idle: begin READY=1; if(start) begin LOAD=1; next_state=s1; end end
+    s1: begin DECR_P=1; ADD=1; next_state=s2; end
+    s2: begin SHIFT=1; next_state = zero ? s3 : s1; end
+    s3: begin FLAGW=1; next_state=s_idle; end
+    endcase
+end
+
+f1: begin
+    case(state)
+    s_idle: begin READY=1; if(start) begin LOAD=1; next_state=s1; end end
+    s1: begin CONVERT=1; next_state=s2; end
+    s2: begin DECR_P=1; ADD=1; next_state=s3; end
+    s3: begin SHIFT=1; next_state = zero ? s4 : s2; end
+    s4: begin FLAGW=1; next_state=s_idle; end
+    endcase
+end
+
+f2: begin
+    case(state)
+    s_idle: begin READY=1; if(start) begin LOAD=1; next_state=s1; end end
+    s1: begin DECR_P=1; if(al0) ADD=1; next_state=s2; end
+    s2: begin SHIFT=1; next_state = zero ? s3 : s1; end
+    s3: begin FLAGW=1; next_state=s_idle; end
+    endcase
+end
+
+f3,f4,f5: begin
+    case(state)
+    s_idle: begin READY=1; if(start) begin LOAD=1; next_state=s1; end end
+    s1: begin
+        if(alu_ctr==f3) AND=1;
+        if(alu_ctr==f4) OR=1;
+        if(alu_ctr==f5) XOR=1;
+        next_state=s2;
+    end
+    s2: begin FLAGW=1; next_state=s_idle; end
+    endcase
+end
+endcase
+end
+
+endmodule
+
+//////////////////////////////////
+//alu data_path
+module ALU_datapath (
+    input clock,
+    input [2:0] alu_ctr,
+    input LOAD, DECR_P, ADD, SHIFT, AND, OR, XOR, FLAGW, CONVERT,
+    input [`dp_width-1:0] data_a, data_b,
+    output wire zero, al0,
+    output reg [`dp_width-1:0] AH, AL,
+    output reg FLAG_N, FLAG_Z, FLAG_C, FLAG_V
+////순서대로 부호, 제로, 캐리, 오버플로우 플래그를 의미함
+//부호는 MSB로 제로는 결과가 0인지, 캐리는 마지막 비트에서 나오는 캐리 비트가 존재하는지 오버플로우는 오버플로우 발생 여부
+);
+
+parameter size = 6;  //최대 32비트 계산 -> 6비트면 충분
+parameter f0=3'b000,f1=3'b001,f2=3'b010,f3=3'b011,f4=3'b100,f5=3'b101;
+
+reg [`dp_width-1:0] B;
+reg [size-1:0] P;
+reg carry_in, carry_out;
+
+assign al0 = AL[0];
+assign zero = (P==0);  //카운터 P의 값이 0인가? 0이면 zero = 1 아니면 0
+
+always @(posedge clock) begin 
+case(alu_ctr) 
+
+f0: begin //add 
+if(LOAD) 
+begin P <= `dp_width; AL <= data_a; B <= data_b; carry_out <= 0; carry_in <= 0; AH <= 0; end 
+
+if(DECR_P) 
+P <= P - 1; 
+
+if(ADD) 
+{carry_out, AH[`dp_width- P]} <= AL[`dp_width - P] + B[`dp_width - P] + carry_in; 
+
+if(SHIFT) 
+{carry_out, carry_in} <= {carry_out, carry_in} >> 1; 
+
+if(FLAGW) 
+begin FLAG_N <= AH[`dp_width-1]; FLAG_Z <= (AH == 0); FLAG_C <= carry_out; FLAG_V <= carry_in ^ carry_out; end 
+end 
+
+f1: begin //sub 
+if(LOAD) 
+begin P <= `dp_width; AL <= data_a; B <= data_b; carry_out <= 0; carry_in <= 0; AH <= 0; end 
+
+if(CONVERT) 
+begin B <= ~B; carry_in = 1; end 
+
+if(DECR_P) P <= P - 1; 
+
+if(ADD) {carry_out, AH[`dp_width - P]} <= AL[`dp_width - P] + B[`dp_width - P] + carry_in; 
+
+if(SHIFT) {carry_out, carry_in} <= {carry_out, carry_in} >> 1; 
+// 마지막 오버플로우 플래그 처리를 위해 
+//마지막 비트 자리로 들어가는 비트와 나오는 비트는 저장 -> 두 값이 다르면 오버플로우 발생한 것임 
+
+if(FLAGW) 
+begin FLAG_N <= AH[`dp_width-1]; FLAG_Z <= (AH == 0); FLAG_C <= carry_out; FLAG_V <= carry_in ^ carry_out; end 
+end 
+
+f2: begin //multi 
+if(LOAD) 
+begin AL <= data_a; AH <= 0; B <= data_b; P <= `dp_width; carry_in <= 0; carry_out <= 0; end 
+
+if(DECR_P) P <= P - 1; 
+
+if(ADD) {carry_in, AH} <= B + AH; 
+
+if(SHIFT) {carry_in, AH, AL} <= {carry_in, AH, AL} >> 1; 
+
+if(FLAGW) 
+begin FLAG_N <= AH[`dp_width-1]; FLAG_Z <= ({AH + AL} == 0); FLAG_C <= 0; FLAG_V <= 0; end 
+end 
+
+f3: begin //bitwise and 
+if(LOAD) 
+begin AL <= data_a; B <= data_b; AH <= 0; end 
+
+if(AND) 
+AH <= AL & B; 
+
+if(FLAGW) 
+begin FLAG_N <= 0; FLAG_C <= 0; FLAG_V <= 0; FLAG_Z <= 0; end //정상적으로는 FLAGW 명령어가 실행되지는 않음 
+end 
+
+f4: begin 
+if(LOAD) begin AL <= data_a; B <= data_b; AH <= 0; end 
+
+if(OR) AH <= AL | B; 
+
+if(FLAGW) begin FLAG_N <= 0; FLAG_C <= 0; FLAG_V <= 0; FLAG_Z <= 0; end end 
+
+f5: begin 
+if(LOAD) begin AL <= data_a; B <= data_b; AH <= 0; end 
+
+if(XOR) AH <= AL ^ B; 
+
+if(FLAGW) begin FLAG_N <= 0; FLAG_C <= 0; FLAG_V <= 0; FLAG_Z <= 0; end 
+end 
+endcase 
+end 
+endmodule
+
+
+
+//alu testbench
+module tb_alu;
+wire [2 * `dp_width -1: 0] RESULT;
+wire READY, FLAG_N, FLAG_Z, FLAG_C, FLAG_V;
+reg RESET_B, CLOCK, START;
+reg [2:0] ALU_CTR;
+reg [`dp_width-1 :0] DATA_A, DATA_B;
+
+
+ALU_top m1 (
+    READY, RESULT,
+    FLAG_N, FLAG_Z, FLAG_C, FLAG_V,
+    RESET_B, CLOCK, START,
+    ALU_CTR, DATA_A, DATA_B
+);
+
+initial begin
+$dumpfile("test.vcd");
+$dumpvars(0, tb_alu);
+end
+
+initial begin
+CLOCK = 0;
+forever #0.1 CLOCK = ~CLOCK;
+end
+
+initial begin
+RESET_B = 1;
+#3 RESET_B = 0;
+#2 RESET_B = 1;
+end
+
+initial begin
+DATA_A = 10'b01_1111_0011; 
+DATA_B = 10'b01_0000_0011;
+START = 0;
+for(ALU_CTR = 0; ALU_CTR <= 5; ALU_CTR = ALU_CTR + 1) begin
+    #4 START = 1;
+    #6 START = 0;
+    wait(READY); // READY=1 될 때까지 기다림
+    #1 $display("RESULT=%d A:%d B:%d ", RESULT, DATA_A, DATA_B);
+    $display("RESULT:%b A:%b B:%b", RESULT, DATA_A, DATA_B);
+    $display("N=%b Z=%b C=%b V=%b", FLAG_N, FLAG_Z, FLAG_C, FLAG_V);
+end
+#10 $finish;
+end
+
+endmodule;
