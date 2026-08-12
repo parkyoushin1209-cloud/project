@@ -1,9 +1,6 @@
 `include "uvm_macros.svh"
 import uvm_pkg::*;
 
-// APB 인터페이스는 추후 UART, 하드웨어 타이머 등 다른 APB 슬레이브에서의 재사용도 고려해 APB4를 기준으로 일반화 함
-// 인터페이스를 여러 개 생성한 후 설정 데이터베이스에 좀 더 구체적인 이름을 사용해 등록함
-
 interface apb_if(input logic PCLK, PRESETn);
   
     // APB2
