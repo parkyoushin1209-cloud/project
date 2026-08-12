@@ -307,3 +307,14 @@ RTL 내부 동작에 대해서도 FSM 및 Branch Coverage를 수집하였다.
 - EDA Playground
 - UVM RAL
 - SVA
+
+## New Information Learned
+디버깅 중 알게 된 내용들을 정리하면 아래와 같다.
+- 여러 always_comb, always_ff가 있을 때 DUT에서 로직이 평가되는 방식
+- $strobe와 $display의 차이점
+- include는 testbench.sv에서만 사용 후 대부분의 파일에서는 import package를 사용해 중복 선언 문제를 피할 수 있음
+- 클럭킹 블럭에서 input, output 지연의 정확한 의미
+- 메서드 및 관련 정보를 찾을 경우 UVM Users Guides, Class Reference를 적극 참고 가능함
+
+
+
