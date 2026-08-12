@@ -40,7 +40,7 @@ virtual task run_phase(uvm_phase phase);
       @(posedge apb_vif.mon_cb.PENABLE);
      
       @(apb_vif.mon_cb);
-     // $display("@time:%0t, APB_MON:PRDATA=%h", $time, apb_vif.mon_cb.PRDATA);
+     
           if(apb_vif.mon_cb.PWRITE == 1) begin
             apb_tr.data = apb_vif.mon_cb.PWDATA;
             apb_tr.kind = apb_transaction::WRITE;
@@ -50,7 +50,7 @@ virtual task run_phase(uvm_phase phase);
           end
 
           apb_tr.addr  = apb_vif.mon_cb.PADDR;
-  // $display("time:%0t ,MON: apb_tr : data=%h, addr=%h, kind=%s\n", $time, apb_tr.data, apb_tr.addr, apb_tr.kind.name());
+ 
           apb_port.write(apb_tr);
     end
     join_any
