@@ -1,0 +1,413 @@
+`include "uvm_macros.svh"
+import uvm_pkg::*;
+
+
+module GPIO( 
+    input logic PRESETn, PCLK, PENABLE, PWRITE,
+          logic[31:0] PADDR, PWDATA,
+          logic PSEL,
+          logic[7:0] nGPAFEN,GPAFOUT,
+    output logic GPIOINTR,
+  logic[7:0] nGPEN, GPOUT, GPAFIN, GPIOMIS, GPIN,
+           tri[7:0] XP,
+           logic[31:0] PRDATA);
+             
+  logic[7:0] gpio_data ='h00;
+  logic[7:0] gpio_dir ='h00;
+
+  logic[7:0] gpio_is ='h00;
+  logic[7:0] gpio_ibe ='h00;
+  logic[7:0] gpio_iev ='h00;
+  logic[7:0] gpio_ie ='h00;
+  logic[7:0] gpio_ris ='h00;
+  logic[7:0] gpio_mis;
+  logic[7:0] gpio_ic ='h00;
+  logic[7:0] gpio_ic_reset_cond ='h00; // gpio_ic 리셋 조건
+  
+  logic[7:0] gpio_af_sel ='h00;
+  
+localparam logic[7:0] gpio_periph_id0 = 'h61, gpio_periph_id1 = 'h10, gpio_periph_id2 = 'h04, gpio_periph_id3 = 'h00;
+localparam logic[7:0] gpio_pcell_id0 = 'h0D, gpio_pcell_id1 = 'h0F, gpio_pcell_id2 = 'h05, gpio_pcell_id3 = 'hB1;
+// 어써션 포인트 이곳의 값은 변하면 안 됨
+
+  typedef enum bit[1:0] {idle, setup, enable} state_e;
+state_e state, next_state;
+// FSM 상태 저장 변수
+
+logic write_en, read_en; // 읽기/쓰기 구분
+
+// GPIODATA 처리 로직 변수
+// ADDR[9:2]중 1인 비트에만 쓰기, 읽기 시 1인 비트는 읽고 0인 비트는 0반환
+logic[7:0] selected_bit;
+logic[7:0] intr_event;
+  
+typedef enum bit[3:0] {REG_DATA, REG_DIR, REG_IS, 
+                       REG_IBE, REG_IEV, REG_IE, 
+                       REG_RIS, REG_MIS, REG_IC, 
+                       REG_AF_SEL, RESERVED1, RESERVED2, 
+                       REG_PERIPH_ID, REG_PCELL_ID} reg_type_e;
+
+reg_type_e reg_sel;
+//주소 디코딩 후 레지스터 선택
+logic[7:0] prev, GPINSync2;
+  typedef enum bit[3:0] {IDLE, RISING, FALLING, BOTHEDGE, HIGH, LOW} intr_detection_logic_e;
+intr_detection_logic_e intr_detec_logic[8];
+
+
+
+generate 
+    for(genvar i = 0; i < 8; i++) begin
+        assign nGPEN[i]   = (gpio_af_sel[i] == 0) ? gpio_dir[i]  : nGPAFEN[i];
+        assign GPOUT[i]   = (gpio_af_sel[i] == 0) ? gpio_data[i] : GPAFOUT[i]; 
+        //nGPEN, GPOUT MUX 기능 구현
+      assign XP[i]      = (nGPEN[i] == 0) ? GPOUT[i] : 'bz;
+        // nGPEN이 low면 XP 구동 High면 외부에서 받아옴(tri 변수)
+        assign GPIN[i]    = XP[i];
+        // 읽기/쓰기 동작에 관련 없이 GPIN은 XP의 값과 같음
+      assign GPAFIN[i] = (gpio_af_sel[i] == 0)? 'b0 : GPIN[i];
+    end
+endgenerate 
+//--------------------------------------------------------------------
+assign GPIOINTR = |GPIOMIS;
+assign GPIOMIS = gpio_mis;
+assign gpio_mis = gpio_ris & gpio_ie;
+
+//-------------------------------------------------------------------------------
+  
+//next state logic=========================================================
+  always_ff @(posedge PCLK or negedge PRESETn) begin
+if(!PRESETn) begin
+    state <= idle;
+end
+else begin
+   state <= next_state;
+end
+end
+  
+always_comb begin
+   case(state)
+    idle : begin
+      if(PSEL == 0 && PENABLE == 0) next_state = idle;
+      else if(PSEL == 1) next_state = setup;  
+    end
+    setup : begin
+        next_state = enable;
+    end
+    enable : begin
+      if(PSEL == 1) next_state = setup;
+      else next_state = idle;
+        
+    end
+    endcase
+end
+//==============================================================================
+
+// 주소 디코딩==================================================
+always_comb begin
+  if(state == setup) begin
+        case(PADDR) inside
+        [12'h000 : 12'h3FF] : begin reg_sel = REG_DATA; selected_bit = (PADDR >> 2);  end
+        [12'h400 : 12'h403] : reg_sel = REG_DIR;
+        [12'h404 : 12'h407] : reg_sel = REG_IS;
+        [12'h408 : 12'h40B] : reg_sel = REG_IBE;
+        [12'h40C : 12'h40F] : reg_sel = REG_IEV;
+        [12'h410 : 12'h413] : reg_sel = REG_IE;
+        [12'h414 : 12'h417] : reg_sel = REG_RIS;
+        [12'h418 : 12'h41B] : reg_sel = REG_MIS;
+        [12'h41C : 12'h41F] : reg_sel = REG_IC;
+        [12'h420 : 12'h423] : reg_sel = REG_AF_SEL;
+        [12'h424 : 12'hFCF] : reg_sel = RESERVED1;
+        [12'hFD0 : 12'hFDF] : reg_sel = RESERVED2;
+        [12'hFE0 : 12'hFEF] : begin reg_sel = REG_PERIPH_ID; end
+        [12'hFF0 : 12'hFFF] : reg_sel = REG_PCELL_ID;
+        endcase
+    end
+end
+//==============================================================================
+
+// write_en 제어=================================================================
+always_comb begin
+    write_en = (PSEL && PWRITE && PENABLE);
+    read_en  = (PSEL && !PWRITE && PENABLE);
+end
+//int unsigned print_trigger = 0;  
+int unsigned print_trigger = 0;  
+always_ff @(posedge PCLK or negedge PRESETn) begin
+  //$display("@time=%0t state=%s reg_sel=%s PWRITE=%b", $time, state.name(), reg_sel.name(), PWRITE);
+    if(!PRESETn) begin
+      gpio_data   <= 'h00;
+      gpio_dir    <= 'h00;
+      gpio_is     <= 'h00;
+      gpio_ibe    <= 'h00;
+      gpio_iev    <= 'h00;
+      gpio_ie     <= 'h00;
+      gpio_ris    <= 'h00; //- 읽기 전용
+      //gpio_mis    <= 'h00; - assign 문에 의해 알아서 초기화 됨
+      gpio_ic     <= 'h00;
+      gpio_af_sel <= 'h00;
+      GPINSync2 <= 'h00;
+      prev <= 'h00;
+      print_trigger <= 0;
+    end
+  else begin
+    //$display("state = %s", state.name());
+    if(write_en) begin
+        case(reg_sel)
+        REG_DATA   : 
+        begin
+          for(int i = 0; i < 8 ; i++) begin
+           if(selected_bit[i])  gpio_data[i] <= (gpio_af_sel[i]==0) ? PWDATA[i] : GPAFOUT[i];
+        end
+         // $strobe("DUT: reg_sel=%s, value=%h", reg_sel.name(), gpio_data);
+        end             
+        REG_DIR       : begin gpio_dir    <= PWDATA; //$strobe("DUT: reg_sel=%s, value=%h", reg_sel.name(), gpio_dir); 
+        end
+        REG_IS        : begin gpio_is     <= PWDATA; //$strobe("DUT: reg_sel=%s, value=%h", reg_sel.name(), gpio_is); 
+        end
+        REG_IBE       : begin gpio_ibe    <= PWDATA; //$strobe("DUT: reg_sel=%s, value=%h", reg_sel.name(), gpio_ibe); 
+        end
+        REG_IEV       : begin gpio_iev    <= PWDATA; //$strobe("DUT: reg_sel=%s, value=%h", reg_sel.name(), gpio_iev);
+        end
+        REG_IE        : begin gpio_ie     <= PWDATA; //$strobe("DUT: reg_sel=%s, value=%h", reg_sel.name(), gpio_ie); 
+        end
+        REG_RIS       : ;//begin `uvm_error("RO", "Incorrect access to a read-only address ") end
+        REG_MIS       : ;//begin `uvm_error("RO", "Incorrect access to a read-only address ") end
+        REG_IC        : begin gpio_ris     <= gpio_ris & ~PWDATA; //$strobe("DUT: reg_sel=%s, value=%h", reg_sel.name(), gpio_ic); 
+        end
+          REG_AF_SEL    : begin gpio_af_sel <= PWDATA; //$strobe("DUT: reg_sel=%s, value=%h", reg_sel.name(), gpio_af_sel); 
+          end
+        RESERVED1     : ;//begin `uvm_error("RESERVED", "Incorrect access to a reserved address") end                   
+        RESERVED1     : ;//begin `uvm_error("RESERVED", "Incorrect access to a reserved address") end
+        REG_PERIPH_ID : ;//begin `uvm_error("RO", "Incorrect access to a read-only address ") end
+        REG_PCELL_ID  : ;//begin `uvm_error("RO", "Incorrect access to a read-only address ") end
+        endcase 
+      
+    end
+    else if(read_en) begin
+         case(reg_sel)
+        REG_DATA   : 
+        begin
+         // $strobe("DUT : @time=%t : GPIN = %2h (%8b)", $time, GPIN, GPIN);
+        for(int i = 0; i < 8 ; i++) begin
+            if(selected_bit[i]) begin
+                if(gpio_af_sel[i] == 0) PRDATA[i] <= gpio_data[i];
+                else
+                PRDATA[i] <= (gpio_dir[i] == 1) ? gpio_data[i] : GPIN[i];
+            end
+            else PRDATA[i] <= '0;
+        end
+        end             
+        REG_DIR       : PRDATA     <= gpio_dir;
+        REG_IS        : PRDATA     <= gpio_is;
+        REG_IBE       : PRDATA     <= gpio_ibe;
+        REG_IEV       : PRDATA     <= gpio_iev;
+        REG_IE        : PRDATA     <= gpio_ie;
+        REG_RIS       : PRDATA     <= gpio_ris;
+        REG_MIS       : PRDATA     <= gpio_mis;
+        REG_IC        : ;//begin `uvm_error("WO", "Incorrect access to a write-only address ") end
+        REG_AF_SEL    : PRDATA     <= gpio_af_sel;
+        RESERVED1     : ;//begin `uvm_error("RESERVED", "Incorrect access to a reserved address") end
+        RESERVED2     : ;//begin `uvm_error("RESERVED", "Incorrect access to a reserved address") end
+        REG_PERIPH_ID : begin
+        case(PADDR) inside
+        [12'hFE0 : 12'hFE3] : PRDATA  <= gpio_periph_id0;
+        [12'hFE4 : 12'hFE7] : PRDATA  <= gpio_periph_id1;
+        [12'hFE8 : 12'hFEB] : PRDATA  <= gpio_periph_id2;
+        [12'hFEC : 12'hFEF] : PRDATA  <= gpio_periph_id3;
+        endcase
+        end
+        REG_PCELL_ID  :begin
+        case(PADDR) inside
+        [12'hFF0 : 12'hFF3] : PRDATA  <= gpio_pcell_id0;
+        [12'hFF4 : 12'hFF7] : PRDATA  <= gpio_pcell_id1;
+        [12'hFF8 : 12'hFFB] : PRDATA  <= gpio_pcell_id2;
+        [12'hFFC : 12'hFFF] : PRDATA  <= gpio_pcell_id3;
+        endcase
+        end
+        endcase 
+    end
+  if(state == enable) begin 
+    print_trigger++;
+  //$display("time=%0t : enable : DUT=================================================", $time);
+   for(int i = 0 ; i < 8 ; i++) begin
+     if(intr_event[i])begin 
+       gpio_ris[i] <= 1;
+     end
+      else begin
+        gpio_ris[i] <= 0;
+      end
+      if(gpio_ic_reset_cond[i]) begin
+         gpio_ris[i] <= 0; 
+      end
+    end
+        GPINSync2 <= GPIN;
+        prev <= GPINSync2;
+   // if(print_trigger > 30) begin //
+  /*  $strobe( "DUT: @time:%0t--------------------------------------------\n gpio_data = %h (%8b) | gpio_dir = %h (%8b)\n gpio_is = %h (%8b) | gpio_ibe = %h (%8b)\n gpio_iev = %h (%8b) | gpio_ie = %h (%8b)\n gpio_ris = %h (%8b) | gpio_mis = %h (%8b)\n gpio_ic = %h (%8b) | gpio_afsel = %h (%8b)\n--------------------------------------------------------------------------------", $time, gpio_data, gpio_data, gpio_dir, gpio_dir, gpio_is, gpio_is, gpio_ibe, gpio_ibe, gpio_iev, gpio_iev, gpio_ie, gpio_ie, gpio_ris, gpio_ris, gpio_mis, gpio_mis, gpio_ic, gpio_ic, gpio_af_sel, gpio_af_sel );
+    //end //*/
+    end
+    /*if((write_en || read_en)) begin
+      $display("time=%0t : write_en || read_en : DUT=================================================", $time);
+      $strobe( "DUT: @time:%0t--------------------------------------------\n gpio_data = %h (%8b) | gpio_dir = %h (%8b)\n gpio_is = %h (%8b) | gpio_ibe = %h (%8b)\n gpio_iev = %h (%8b) | gpio_ie = %h (%8b)\n gpio_ris = %h (%8b) | gpio_mis = %h (%8b)\n gpio_ic = %h (%8b) | gpio_afsel = %h (%8b)\n--------------------------------------------------------------------------------", $time, gpio_data, gpio_data, gpio_dir, gpio_dir, gpio_is, gpio_is, gpio_ibe, gpio_ibe, gpio_iev, gpio_iev, gpio_ie, gpio_ie, gpio_ris, gpio_ris, gpio_mis, gpio_mis, gpio_ic, gpio_ic, gpio_af_sel, gpio_af_sel );
+
+    end*/
+  end
+end
+
+
+//============================================================================
+
+//인터럽트 감지 로직===================================================================
+
+
+
+generate 
+    for(genvar i = 0; i < 8 ;i++) begin
+    always_comb begin
+        if(!gpio_ibe[i] && gpio_iev[i] && !gpio_is[i]) intr_detec_logic[i] = RISING;
+        else if(!gpio_ibe[i] && !gpio_iev[i] && !gpio_is[i]) intr_detec_logic[i] = FALLING;
+        else if(gpio_ibe[i] && !gpio_iev[i] && !gpio_is[i]) intr_detec_logic[i] = BOTHEDGE;
+        else if(gpio_iev[i] && gpio_is[i]) intr_detec_logic[i] = HIGH;
+        else if(!gpio_iev[i] && gpio_is[i]) intr_detec_logic[i] = LOW;
+        else intr_detec_logic[i] = IDLE; 
+    end
+    end 
+endgenerate
+ 
+
+
+generate;
+    for(genvar i = 0 ; i < 8 ; i++) begin
+        always_comb begin
+           case(intr_detec_logic[i]) 
+           RISING : begin
+           if(!prev[i] && GPINSync2[i]) intr_event[i] = 1;
+           else intr_event[i] = 0;
+           end
+
+           FALLING : begin
+           if(prev[i] && !GPINSync2[i]) intr_event[i] = 1;
+           else intr_event[i] = 0;
+           end
+
+           BOTHEDGE : begin
+           if(prev[i] ^ GPINSync2[i]) intr_event[i] = 1;
+           else intr_event[i] = 0;
+           end
+
+           HIGH : begin
+           if(GPINSync2[i]) intr_event[i] = 1;
+           else intr_event[i] = 0;
+           end
+           
+           LOW : begin
+           if(~GPINSync2[i]) intr_event[i] = 1; 
+           else intr_event[i] = 0;
+           end
+
+           IDLE : intr_event[i] = 0;
+           default : intr_event[i] = 0;
+           endcase
+        end
+    end
+endgenerate
+
+
+generate // 에지 트리거되는 인터럽트 발생 시 소프트웨어는 추가적인 인터럽트 발생을 가능하게 하기 위해 이를 초기화해줘야 함
+    for(genvar i =0; i < 8; i++) begin
+        always_comb begin
+           if ((intr_detec_logic[i] == RISING  || intr_detec_logic[i] == FALLING || intr_detec_logic[i] == BOTHEDGE) && gpio_mis[i]) gpio_ic_reset_cond[i] = 1'b1;
+           else gpio_ic_reset_cond[i] = 0;
+        end
+    end
+endgenerate
+  
+  // ============================================================================
+// [Portfolio] 수동 코드 / 분기 / FSM 커버리지 수집 및 백분율 계산 로직
+// ============================================================================
+int unsigned rtl_branch_hits[10];      
+int unsigned rtl_fsm_trans_hits[3][3]; 
+
+// 백분율 계산을 위한 변수
+int fsm_total_cases = 5;       // 의미 있는 FSM 주요 전이 경우의 수 (idle->setup, setup->enable, enable->idle, enable->setup, idle->idle)
+int fsm_hit_count   = 0;
+int branch_total_cases = 10;   // 총 분기 포인트 수
+int branch_hit_count   = 0;
+real fsm_coverage_pct  = 0.0;
+real branch_coverage_pct = 0.0;
+
+always_ff @(posedge PCLK or negedge PRESETn) begin
+    if (!PRESETn) begin
+        for(int i=0; i<10; i++) rtl_branch_hits[i] = 0;
+        for(int i=0; i<3; i++) begin
+            for(int j=0; j<3; j++) rtl_fsm_trans_hits[i][j] = 0;
+        end
+    end
+    else begin
+        // 1. FSM 상태 전이 수집
+        rtl_fsm_trans_hits[state][next_state]++;
+
+        // 2. 주요 제어 분기(Branch) 수집
+        if (write_en) begin
+            rtl_branch_hits[0]++;
+            if (reg_sel == REG_DATA) rtl_branch_hits[1]++;
+            else if (reg_sel == REG_IC) rtl_branch_hits[2]++;
+        end
+        else if (read_en) begin
+            rtl_branch_hits[3]++;
+            if (reg_sel == REG_PERIPH_ID) rtl_branch_hits[4]++;
+        end
+
+        // 3. 인터럽트 감지 분기 수집
+        for(int i=0; i<8; i++) begin
+            case(intr_detec_logic[i])
+                RISING:   rtl_branch_hits[5]++;
+                FALLING:  rtl_branch_hits[6]++;
+                BOTHEDGE: rtl_branch_hits[7]++;
+                HIGH:     rtl_branch_hits[8]++;
+                LOW:      rtl_branch_hits[9]++;
+                default: ;
+            endcase
+        end
+    end
+end
+
+// 시뮬레이션 종료 시점에 커버리지 백분율 계산 및 출력
+final begin
+    // FSM 달성 개수 카운트 (한 번이라도 방문한 전이 조합 계산)
+    fsm_hit_count = 0;
+    if (rtl_fsm_trans_hits[0][1] > 0) fsm_hit_count++; // IDLE -> SETUP
+    if (rtl_fsm_trans_hits[1][2] > 0) fsm_hit_count++; // SETUP -> ENABLE
+    if (rtl_fsm_trans_hits[2][0] > 0) fsm_hit_count++; // ENABLE -> IDLE
+    if (rtl_fsm_trans_hits[2][1] > 0) fsm_hit_count++; // ENABLE -> SETUP
+    if (rtl_fsm_trans_hits[0][0] > 0) fsm_hit_count++; // IDLE -> IDLE
+
+    // Branch 달성 개수 카운트 (한 번이라도 수행된 분기 조건 계산)
+    branch_hit_count = 0;
+    for(int i=0; i<10; i++) begin
+        if (rtl_branch_hits[i] > 0) branch_hit_count++;
+    end
+
+    // 백분율 계산
+    fsm_coverage_pct    = (real'(fsm_hit_count) / real'(fsm_total_cases)) * 100.0;
+    branch_coverage_pct = (real'(branch_hit_count) / real'(branch_total_cases)) * 100.0;
+
+    $display("==================================================================================");
+    $display("                 [ RTL Manual Coverage & Percentage Report ]                      ");
+    $display("==================================================================================");
+    $display(" [1] FSM State Transition Coverage : %0.2f%% (%0d / %0d cases hit)", 
+             fsm_coverage_pct, fsm_hit_count, fsm_total_cases);
+    $display("   - IDLE->SETUP: %0d | SETUP->ENABLE: %0d | ENABLE->IDLE: %0d", 
+             rtl_fsm_trans_hits[0][1], rtl_fsm_trans_hits[1][2], rtl_fsm_trans_hits[2][0]);
+    $display("   - ENABLE->SETUP: %0d | IDLE->IDLE: %0d", 
+             rtl_fsm_trans_hits[2][1], rtl_fsm_trans_hits[0][0]);
+
+    $display("----------------------------------------------------------------------------------");
+    $display(" [2] Branch / Condition Coverage   : %0.2f%% (%0d / %0d branches hit)", 
+             branch_coverage_pct, branch_hit_count, branch_total_cases);
+    $display("   - Write Op: %0d | Read Op: %0d | Rising: %0d | Falling: %0d | Both: %0d", 
+             rtl_branch_hits[0], rtl_branch_hits[3], rtl_branch_hits[5], rtl_branch_hits[6], rtl_branch_hits[7]);
+    $display("==================================================================================");
+end
+  
+endmodule : GPIO
