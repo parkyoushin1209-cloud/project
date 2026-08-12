@@ -52,3 +52,7 @@ spec에 제공된 레지스터 별 offset 및 주소 공간 크기등을 반영�
 - NBA timing 확인
 - `$display` / `$strobe` 비교
 - 원인 수정
+
+## Items to be added to the project later
+- Sequencer aggregator 사용
+- Config Object 사용
