@@ -33,7 +33,7 @@ APB Master Agent를 구성하여 DUT의 APB Slave Interface를 검증하였다.
 
 ### GPIO UVC
 
-GPIO 외부 입력 및 출력 동작을 검증하기 위한 GPIO Agent를 구성하였다.
+GPIO 외부 입력 및 출력 동작을 검증하기 위한 GPIO Agent를 구성하였으며 온-칩 신호를 나타내는 GPIO 계열과 외부와 연결된 pad 신호를 나타내는 GPIO I/O 계열 컴포넌트로 분리하였다.
 
 - GPIO Driver
 - GPIO Monitor
@@ -178,9 +178,8 @@ RTL 내부 동작에 대해서도 FSM 및 Branch Coverage를 수집하였다.
 
 ## Debugging
 
-검증 과정에서 DUT와 Scoreboard 간 mismatch가 발생한 경우
-단순히 결과값만 비교하지 않고 SystemVerilog simulation scheduling을
-분석하여 원인을 추적하였다.
+검증 과정에서 DUT와 Scoreboard 간 mismatch가 발생한 경우 단순히 결과값만 비교하지 않고 SystemVerilog simulation scheduling을 분석하여 원인을 추적하였다.
+
 
 특히 다음과 같은 방법을 사용하였다.
 
@@ -196,16 +195,107 @@ RTL 내부 동작에 대해서도 FSM 및 Branch Coverage를 수집하였다.
 
 ## Result
 
-| Category | Result |
-|---|---|
-| Register Verification | PASS |
-| APB Protocol Assertion | PASS |
-| GPIO Functional Verification | PASS |
-| Interrupt Verification | PASS |
-| Corner Case Verification | PASS |
-| Functional Coverage | XX% |
-| FSM Coverage | XX% |
-| Branch Coverage | XX% |
+# ==================================================================================
+#                  [ APB Manual Coverage & Detailed Bin Hit Report ]                
+# ==================================================================================
+#  [1] cp_reg Bin Hits:
+#    - GPIODATA(0x000-3FF) : 913 | GPIODIR(0x400-403) : 767 | GPIOIS(0x404-407)  : 762
+#    - GPIOIBE(0x408-40B)  : 745 | GPIOIEV(0x40C-40F) : 778 | GPIOIE(0x410-413)   : 758
+#    - GPIORIS(0x414-417)  : 785 | GPIOMIS(0x418-41B) : 788 | GPIOIC(0x41C-41F)   : 801
+#    - GPIOAFSEL(0x420-423): 775 | RESERVED(0x424-FDF): 553 | PERIPHID(0xFE0-FEF) : 801
+#    - PCELLID(0xFF0-FFF)  : 772
+# ----------------------------------------------------------------------------------
+#  [2] cp_masked_addr Bin Hits:
+#    - ALL0: 771 | ALL1: 205 | UPPER_ON: 8 | LOWER_ON: 4 | ALT_1010: 5
+#    - ALT_0101: 6 | OTHERS_LOW: 6642 | OTHERS_MID: 484 | OTHERS_HIGH: 1860
+# ----------------------------------------------------------------------------------
+#  [3] cp_kind & cp_data Bin Hits:
+#    - WRITE: 4158 | READ: 5840
+#    - DATA ALL0: 1258 | DATA ALL1: 240 | DATA ALT_TOGGLE/PATTERNS active hits
+# ----------------------------------------------------------------------------------
+#  [4] Cross Coverage Hits:
+#    - REG_X_KIND Total Valid Hits (Excluding RO/WO invalid access):
+#      Reg[ 0] -> WRITE Hits: 536, READ Hits: 377
+#      Reg[ 1] -> WRITE Hits: 363, READ Hits: 404
+#      Reg[ 2] -> WRITE Hits: 376, READ Hits: 386
+#      Reg[ 3] -> WRITE Hits: 379, READ Hits: 366
+#      Reg[ 4] -> WRITE Hits: 389, READ Hits: 389
+#      Reg[ 5] -> WRITE Hits: 360, READ Hits: 398
+#      Reg[ 6] -> WRITE Hits: 0, READ Hits: 784
+#      Reg[ 7] -> WRITE Hits: 0, READ Hits: 787
+#      Reg[ 8] -> WRITE Hits: 801, READ Hits: 0
+#      Reg[ 9] -> WRITE Hits: 394, READ Hits: 381
+#      Reg[10] -> WRITE Hits: 0, READ Hits: 0
+#      Reg[11] -> WRITE Hits: 0, READ Hits: 799
+#      Reg[12] -> WRITE Hits: 0, READ Hits: 769
+#    - datareg_x_kind_x_data_x_mask (GPIODATA Complex Cross) Total Hits : 752
+# ==================================================================================
+# --- APB Individual Coverpoint Coverages ---
+# cp_reg coverage     = 100.00%
+# cp_masked_addr cov  = 100.00%
+# cp_kind coverage    = 100.00%
+# cp_data coverage    = 100.00%
+# REG_X_KIND cross    = 95.00%
+# UVM_INFO gpio_cov_coll_t.sv(139) @ 300025: uvm_test_top.gpio_system_env.gpio.gpio_cov_coll [DEBUG] report_phase entered!
+# ==================================================================================
+#                [ GPIO Manual Coverage & Bin Hit Report ]                          
+# ==================================================================================
+#  [1] cp_GPAFOUT Bin Hits (Manual Calculated):
+#    - ALL0       : 638 | ALL1       : 395 | UPPER_ON   : 391
+#    - LOWER_ON   : 396 | ALT_1010   : 357 | ALT_0101   : 390
+#    - OTHERS_LOW : 2099 | OTHERS_MID : 3157 | OTHERS_HIGH: 2174
+#    - ALL1_2_ALL0: 38 | ALL0_2_ALL1: 20 | ALT_TOGGLE : 31
+#    -> Manual Hit Rate: 100.00% (12 / 12 bins)
+# ----------------------------------------------------------------------------------
+#  [2] cp_nGPAFEN Bin Hits (Manual Calculated):
+#    - ALL0       : 32 | ALL1       : 1755 | UPPER_ON   : 138
+#    - LOWER_ON   : 128 | ALT_1010   : 107 | ALT_0101   : 97
+#    - OTHERS_LOW : 707 | OTHERS_MID : 2145 | OTHERS_HIGH: 4888
+#    - ALL1_2_ALL0: 2 | ALL0_2_ALL1: 1 | ALT_TOGGLE : 1
+#    -> Manual Hit Rate: 100.00% (12 / 12 bins)
+# ==================================================================================
+# --- GPIO Individual Coverpoint Coverages (Simulator Built-in) ---
+# cp_GPAFOUT coverage = 100.00%
+# cp_nGPAFEN coverage = 100.00%
+# Register    Read Count    Write Count     Access attribute
+# ============================================================================
+# GPIODATA       377           536             RW
+# GPIODIR        404           363             RW
+# GPIOAFSEL      381           394             RW
+# GPIOIS         386           376             RW
+# GPIOIBE        366           378             RW
+# GPIOIEV        389           389             RW
+# GPIOIE         398           360             RW
+# GPIORIS        784            1              RO
+# GPIOMIS        787            1              RO
+# GPIOIC          0            801             WO
+# GPIOPERIPHID0  172            0              RO
+# GPIOPERIPHID1  209            0              RO
+# GPIOPERIPHID2  199            1              RO
+# GPIOPERIPHID3  219            1              RO
+# GPIOPCELLID0   173            0              RO
+# GPIOPCELLID1   216            0              RO
+# GPIOPCELLID2   180            2              RO
+# GPIOPCELLID3   200            1              RO
+# Reserved        0            553           Reserved
+# Overall        5840          4157             
+# intr_mismatch = 0,   read_mismatch = 0, io_mismatch = 0, core_mismatch=0
+# ============================================================================
+
+
+
+# ** Note: $finish    : /usr/share/questa/questasim/verilog_src/uvm-1.2/src/base/uvm_root.svh(517)
+#    Time: 300025 ns  Iteration: 86  Instance: /tb_top
+# ==================================================================================
+#                  [ RTL Manual Coverage & Percentage Report ]                      
+# ==================================================================================
+#  [1] FSM State Transition Coverage : 60.00% (3 / 5 cases hit)
+#    - IDLE->SETUP: 9998 | SETUP->ENABLE: 9998 | ENABLE->IDLE: 9997
+#    - ENABLE->SETUP: 0 | IDLE->IDLE: 0
+# ----------------------------------------------------------------------------------
+#  [2] Branch / Condition Coverage   : 100.00% (10 / 10 branches hit)
+#    - Write Op: 4158 | Read Op: 5840 | Rising: 31479 | Falling: 29392 | Both: 27687
+# ==================================================================================
 
 ---
 
